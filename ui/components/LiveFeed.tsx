@@ -83,7 +83,9 @@ function Think({ l, read, edits, clock }: { l: LoopRun; read: Observation[]; edi
   return (
     <article className="think">
       <header className="think-head">
-        <b>Loop {l.loop}</b>
+        <time dateTime={l.ts} suppressHydrationWarning>
+          <b>{new Date(l.ts).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</b>
+        </time>
         <span className="muted">{ago(l.ts, clock)} · thought for {l.duration_s}s</span>
         <span className={`verdict${edits.length ? " changed" : ""}`}>
           {edits.length ? `${edits.length} plan change${edits.length === 1 ? "" : "s"}` : "no changes"}
