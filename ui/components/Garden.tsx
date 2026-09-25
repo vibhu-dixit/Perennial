@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { GardenState, PlanEdit } from "@/lib/types";
+import type { GardenState, LoopRun, Observation, PlanEdit } from "@/lib/types";
 import AskGarden from "./AskGarden";
 import BedMap from "./BedMap";
+import LiveFeed, { type FeedEvent } from "./LiveFeed";
 import LogDialog from "./LogDialog";
 import ThisWeek from "./ThisWeek";
 import ThreatWatch from "./ThreatWatch";
@@ -11,7 +12,17 @@ import Timeline from "./Timeline";
 import Vitals from "./Vitals";
 import { Logo, Plus } from "./icons";
 
-const POLL_MS = 5000;
+const POLL_MS = 30_000; // fallback only — rows are pushed over /api/stream
+
+const asEvent = (o: Observation, i = 0): FeedEvent => ({ ...o, key: `${o.ts}-${o.kind}-${i}` });
+const loopEvent = (l: LoopRun): FeedEvent => ({
+  ts: l.ts,
+  source: "gardener",
+  kind: "loop",
+  loop: l.loop,
+  key: `loop-${l.loop}`,
+  content: { text: `Loop ${l.loop}: read ${l.obs_count} observation${l.obs_count === 1 ? "" : "s"} → ${l.edits_count} plan edit${l.edits_count === 1 ? "" : "s"} in ${l.duration_s}s` },
+});
 
 function seasonChip(iso: string) {
   const d = new Date(iso);
@@ -32,18 +43,65 @@ export default function Garden({ initial }: { initial: GardenState }) {
   const [toast, setToast] = useState<Toast | null>(null);
   const [changed, setChanged] = useState<Set<string>>(new Set());
   const [clock, setClock] = useState(() => Date.now());
+  const [events, setEvents] = useState<FeedEvent[]>(() => initial.live.events.map(asEvent));
   const prev = useRef(initial);
+  const pendingLog = useRef<string | null>(null);
+  const manual = useRef(false); // a button-run loop toasts for itself
 
   const refresh = useCallback(async (v: number | null = version) => {
     const res = await fetch(`/api/state${v ? `?version=${v}` : ""}`, { cache: "no-store" });
     if (res.ok) setState(await res.json());
   }, [version]);
 
-  // Live polling — the Python loop may rewrite the plan at any time.
+  // Fallback polling, plus a ticking clock for the "12s ago" labels.
   useEffect(() => {
-    const id = setInterval(() => { refresh(); setClock(Date.now()); }, POLL_MS);
-    return () => clearInterval(id);
+    const id = setInterval(() => refresh(), POLL_MS);
+    const tick = setInterval(() => setClock(Date.now()), 5000);
+    return () => { clearInterval(id); clearInterval(tick); };
   }, [refresh]);
+
+  // Push: every row the stream or the gardener writes arrives here the moment it lands.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    const es = new EventSource("/api/stream");
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const soon = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => refreshRef.current(), 400);
+    };
+    es.addEventListener("row", (msg) => {
+      const { table, row } = JSON.parse((msg as MessageEvent).data) as { table: string; row: unknown };
+      setClock(Date.now());
+      if (table === "observations") {
+        const o = row as Observation;
+        setEvents((ev) => [asEvent(o, ev.length), ...ev].slice(0, 40));
+        if (o.kind === "conditions") setState((st) => ({ ...st, live: { ...st.live, conditions: o, streaming: true } }));
+      } else if (table === "loops") {
+        const l = row as LoopRun;
+        setEvents((ev) => [loopEvent(l), ...ev].slice(0, 40));
+        void announce(l);
+      }
+      soon();
+    });
+    return () => { es.close(); if (timer) clearTimeout(timer); };
+  }, []);
+
+  /** A loop just finished in the stream — show what it changed. */
+  async function announce(l: LoopRun) {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    if (!res.ok) return;
+    const next: GardenState = await res.json();
+    setVersion(null);
+    setState(next);
+    const fresh = next.edits.filter((e) => e.loop === l.loop && e.op !== "KEEP");
+    const logged = pendingLog.current;
+    pendingLog.current = null;
+    if (manual.current || (!fresh.length && !logged)) return;
+    const title = logged ? `Logged “${logged}”` : "New readings";
+    setToast({ title: fresh.length ? `${title} — plan rewrote itself` : `${title} — no changes needed`, edits: fresh });
+    setTimeout(() => setToast(null), 7000);
+  }
 
   // Diff plan versions → which beds and tasks just changed (they pulse / glow).
   useEffect(() => {
@@ -71,11 +129,17 @@ export default function Garden({ initial }: { initial: GardenState }) {
     refresh(v);
   };
 
-  async function runLoop(title = "The gardener ran a loop") {
+  async function runLoop(title = "The gardener ran a loop", afterLog = false) {
     setRunning(true);
+    manual.current = !afterLog;
     try {
       const before = state.current.version;
-      await fetch("/api/loop", { method: "POST" });
+      const ran = await fetch(`/api/loop${afterLog ? "?wait=0" : ""}`, { method: "POST" });
+      if (afterLog && (await ran.json().catch(() => ({}))).kind === "stream") {
+        // The stream folds the log in within seconds; its loop row arrives over /api/stream and announces itself.
+        setToast({ title: `${title} — the gardener is thinking…`, edits: [] });
+        return;
+      }
       setVersion(null);
       const res = await fetch("/api/state", { cache: "no-store" });
       const next: GardenState = await res.json();
@@ -85,6 +149,7 @@ export default function Garden({ initial }: { initial: GardenState }) {
       setTimeout(() => setToast(null), 7000);
     } finally {
       setRunning(false);
+      manual.current = false;
     }
   }
 
@@ -104,7 +169,7 @@ export default function Garden({ initial }: { initial: GardenState }) {
         <span className="chip">{seasonChip(state.now)}</span>
         <span className={`chip live${isLive ? "" : " past"}`}>
           <span className="dot" />
-          {isLive ? "LIVE" : `PAST · v${viewing.version}`}
+          {isLive ? (state.live.streaming ? "STREAMING" : "LIVE") : `PAST · v${viewing.version}`}
         </span>
         <button className="btn terra" onClick={() => setLogging(true)} disabled={running}>
           <Plus size={14} /> Log planting
@@ -143,6 +208,10 @@ export default function Garden({ initial }: { initial: GardenState }) {
         </div>
 
         <div className="full">
+          <LiveFeed live={state.live} events={events} clock={clock} />
+        </div>
+
+        <div className="full">
           <Timeline timeline={state.timeline} harvests={state.harvests} viewing={viewing} live={current.version} onPick={scrub} />
         </div>
 
@@ -163,7 +232,8 @@ export default function Garden({ initial }: { initial: GardenState }) {
           onClose={() => setLogging(false)}
           onLogged={(text) => {
             setLogging(false);
-            runLoop(`Logged “${text}”`);
+            pendingLog.current = text;
+            runLoop(`Logged “${text}”`, true);
           }}
         />
       )}

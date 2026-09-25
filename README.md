@@ -28,12 +28,28 @@ Gardeners know this problem intimately. A garden is a multi-year, multi-threaded
                    pests, varieties  RETIRE / ADD         queryable
 ```
 
-**One loop, every few minutes (or on demand):**
-1. **Nimble** pulls fresh external observations: local forecast, frost risk, regional pest/disease alerts, variety notes.
-2. Raw observations are appended to RawTree (`observations`).
+**Streaming, always on.** `python loop/main.py` keeps a live feed of the world around the garden
+(Lancaster County, PA by default) and stores each reading the moment it lands:
+
+| Feed | Source | Polled | What arrives |
+|---|---|---|---|
+| Current conditions | Open-Meteo (no key) | every 2 min (source refreshes every 15) | air & soil temp, soil moisture, humidity, wind, rain |
+| Weather alerts | National Weather Service (no key) | every 60 s | frost/freeze advisories, storm warnings |
+| Forecast | Open-Meteo | every 30 min, stored only when it changes | coldest night, week's rain |
+| Pest & disease news | Nimble news search | every 30 min | new local reports for the crops in the beds |
+| Your logs | the UI | instantly | plantings, harvests, notes |
+
+Anything significant — a log, an alert, a pest report, a changed forecast, a frosty or waterlogged reading — wakes
+the gardener immediately; routine readings are batched into a think at most every 15 minutes. The UI subscribes to
+`/api/stream` (server-sent events) so readings, plan edits and loops appear as they're written, and "Ask the garden"
+streams the model's answer token by token, grounded in the latest readings.
+
+**Each think:**
+1. Everything that streamed in since the last think is gathered — readings, alerts, **Nimble** reports, your logs.
+2. Those raw observations are already in RawTree (`observations`), appended as they arrived.
 3. **Liquid AI** receives the *current plan* (small, bounded), the new observations, and a strict JSON schema. It returns plan edits — never prose.
 4. Edits are applied, each logged with a reason (`plan_edits`). The plan stays small; history stays complete.
-5. The UI re-renders from the current plan. "Ask the garden" answers from current state only.
+5. The new plan version and edits are pushed to the UI. "Ask the garden" answers from current state and live readings only.
 
 **The persist/discard boundary** — the whole point:
 - **Persists:** variety performance per bed across years, soil history, what actually worked, open threats, upcoming tasks.
@@ -80,7 +96,7 @@ No keys needed to try it — the loop falls back to a rule gardener and the demo
 ```bash
 cp .env.example .env              # add keys when you have them (see below)
 python seed/demo_garden.py        # 2 seasons of history (needs node)
-python loop/main.py               # the autonomous loop, every 5 min (or --once)
+python loop/main.py               # the always-on stream (--once: one loop; --poll: old fixed interval)
 cd ui && npm install && npm run dev   # http://localhost:3000 — watch the garden think
 ```
 
@@ -103,6 +119,7 @@ small model can only emit well-formed edits against real bed/task/threat ids. A 
 | `LIQUID_API_BASE` (+ `LIQUID_MODEL`, optional `LIQUID_API_KEY`) | Plan edits and "Ask the garden" (OpenAI-compatible chat API — the local llama-server above) | Rule gardener; Ask answers from the plan's memory |
 | `NIMBLE_API_KEY` + `NIMBLE_API_URL` (`https://sdk.nimbleway.com/v2/search`) | Pest alerts and variety notes via web search | No search observations |
 | `GARDEN_LAT` + `GARDEN_LON` (+ `GARDEN_REGION`) | Real 7-day forecast and frost risk (Open-Meteo, no key). Defaults to Lancaster County, PA — prime farmland with a real frost season | Demo forecast only |
+| — | NWS alerts (api.weather.gov) need no key; they use `GARDEN_LAT`/`GARDEN_LON` | — |
 | `PERENNIAL_STORE=rawtree` + `RAWTREE_DATABASE` + `rtree login --api-key …` | Every row also written to RawTree | Local JSONL in `data/` only |
 
 `PERENNIAL_DEMO=1` injects the scripted "cold snap Thursday" forecast for the live demo; `.env.example` ships with `0`, the real forecast.

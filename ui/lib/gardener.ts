@@ -1,10 +1,11 @@
 import "server-only";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { WEEKDAY, addDays, applyEdit, isFrostTender, isoDay, nextWeekday, planWords, WORD_BUDGET } from "./plan";
-import { append, latestPlan, readTable } from "./store";
+import { append, DATA_DIR, latestPlan, readTable } from "./store";
 import type { Observation, Plan, PlanEdit } from "./types";
 
 // One on-demand loop (PDD §5). The Python loop does the real work (Nimble →
@@ -18,7 +19,15 @@ export function gardenerKind(): "python" | "demo" {
   return existsSync(LOOP_PY) ? "python" : "demo";
 }
 
-export async function runLoop(): Promise<{ edits: number; kind: "python" | "demo"; error?: string }> {
+/** Is the always-on stream (`python loop/main.py`) running? It touches this file every few seconds. */
+export async function streamAlive(): Promise<boolean> {
+  const s = await stat(path.join(DATA_DIR, ".stream.alive")).catch(() => null);
+  return !!s && Date.now() - s.mtimeMs < 30_000;
+}
+
+/** `wait: false` — if the stream is running it will pick up a fresh user log within seconds, so don't start a second loop. */
+export async function runLoop({ wait = true } = {}): Promise<{ edits: number; kind: "python" | "demo" | "stream"; error?: string }> {
+  if (!wait && (await streamAlive())) return { edits: 0, kind: "stream" };
   if (gardenerKind() === "python") {
     try {
       const { stdout } = await promisify(execFile)(process.env.PERENNIAL_PYTHON || "python3", [LOOP_PY, "--once"], {

@@ -120,4 +120,13 @@ export interface GardenState {
     lastLoopTs: string | null;
   };
   gardener: "python" | "demo";
+  live: LiveState;
+}
+
+/** The streamed side of the garden: the latest conditions reading and the newest events. */
+export interface LiveState {
+  conditions: Observation | null;
+  events: Observation[];
+  /** True while `python loop/main.py` (stream mode) is running. */
+  streaming: boolean;
 }

@@ -1,5 +1,5 @@
 import "server-only";
-import { gardenerKind } from "./gardener";
+import { gardenerKind, streamAlive } from "./gardener";
 import { planWords, WORD_BUDGET } from "./plan";
 import { readTable } from "./store";
 import type { GardenState } from "./types";
@@ -17,6 +17,7 @@ export async function gardenState(version?: number): Promise<GardenState> {
   const current = sorted[sorted.length - 1];
   const viewing = (version && sorted.find((v) => v.version === version)) || current;
   const lastNimble = observations.findLast((o) => o.source === "nimble");
+  const liveObs = observations.filter((o) => o.source !== "seed");
 
   return {
     now: new Date().toISOString(),
@@ -37,5 +38,10 @@ export async function gardenState(version?: number): Promise<GardenState> {
       lastLoopTs: loops.at(-1)?.ts ?? null,
     },
     gardener: gardenerKind(),
+    live: {
+      conditions: liveObs.findLast((o) => o.kind === "conditions") ?? null,
+      events: liveObs.slice(-25).reverse(),
+      streaming: await streamAlive(),
+    },
   };
 }

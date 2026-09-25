@@ -29,7 +29,7 @@ export default function Vitals({ vitals, gardener, clock, onRunLoop, running }: 
       </div>
       <div className="vital">
         <div className="n">{fmt(vitals.observations)}</div>
-        <div className="l">observations · Nimble {ago(vitals.lastNimbleTs, clock)}</div>
+        <div className="l">observations · last reading {ago(vitals.lastNimbleTs, clock)}</div>
       </div>
       <div className="vital">
         <button className="btn ghost" onClick={onRunLoop} disabled={running} style={{ width: "100%" }}>

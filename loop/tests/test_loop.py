@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402
+import nimble_adapter  # noqa: E402
 from gardener import LiquidGardener, RuleGardener, apply_within_budget, edit_schema, hygiene, parse_json, validate  # noqa: E402
 from plan import WORD_BUDGET, apply_edit, empty_plan, plan_words  # noqa: E402
 from rawtree_store import Store  # noqa: E402
@@ -244,3 +245,54 @@ class Loop(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Feeds(unittest.TestCase):
+    ENV = {"GARDEN_LAT": "40.04", "GARDEN_LON": "-76.31", "NIMBLE_API_KEY": "k", "NIMBLE_API_URL": "https://nimble.test"}
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, self.ENV)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
+    @staticmethod
+    def current(t="2026-09-25T12:00", air=18.0):
+        return lambda *_: {"current": {"time": t, "temperature_2m": air, "relative_humidity_2m": 60, "precipitation": 0.0,
+                                       "wind_speed_10m": 10.0, "soil_temperature_0cm": 16.0, "soil_moisture_0_to_1cm": 0.25}}
+
+    def test_conditions_skip_an_unchanged_reading(self):
+        o = nimble_adapter.conditions(NOW, 1, None, self.current())
+        self.assertEqual((o["kind"], o["content"]["obs_time"], o["content"]["air_c"]), ("conditions", "2026-09-25T12:00", 18.0))
+        self.assertIsNone(nimble_adapter.conditions(NOW, 1, "2026-09-25T12:00", self.current()))
+
+    def test_alerts_and_news_only_post_new_items(self):
+        alert = {"features": [{"properties": {"id": "a1", "event": "Frost Advisory", "headline": "Frost tonight", "severity": "Minor"}}]}
+        seen: set[str] = set()
+        self.assertEqual(len(nimble_adapter.alerts(NOW, 1, seen, lambda *_: alert)), 1)
+        self.assertEqual(nimble_adapter.alerts(NOW, 1, seen, lambda *_: alert), [])
+        hits = {"results": [{"title": "Late blight found", "description": "Lancaster fields", "url": "https://x/1"}]}
+        urls: set[str] = set()
+        self.assertEqual(len(nimble_adapter.news(NOW, 1, garden(), urls, lambda *_: hits)), 1)
+        self.assertEqual(nimble_adapter.news(NOW, 1, garden(), urls, lambda *_: hits), [])
+
+    def test_only_unusual_readings_are_significant(self):
+        mild = nimble_adapter.conditions(NOW, 1, None, self.current(air=18.0))
+        frosty = nimble_adapter.conditions(NOW, 1, None, self.current(air=2.0))
+        self.assertFalse(nimble_adapter.significant(mild))
+        self.assertTrue(nimble_adapter.significant(frosty))
+        self.assertTrue(nimble_adapter.significant(user_log("Planted kale")))
+
+    def test_loop_on_streamed_observations_never_calls_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), rawtree=False)
+            store.append("plan_versions", {"version": 1, "ts": "2026-09-01T00:00:00.000Z", "loop": 0, "plan": garden()})
+            store.append("observations", cold_forecast())
+
+            def no_http(*_):
+                raise AssertionError("stream loops must not fetch")
+
+            result = main.run_once(store, RuleGardener(), NOW, http=no_http, observe=False)
+        self.assertEqual(result["obs_count"], 1)
+        self.assertIn("Cover tomatoes Thu night", [e["after"]["title"] for e in result["edits"] if e["target"].startswith("tasks/")])

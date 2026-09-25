@@ -39,7 +39,8 @@ def loop_lock(store: Store):
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def run_once(store: Store, gardener=None, now: datetime | None = None, http=None) -> dict:
+def run_once(store: Store, gardener=None, now: datetime | None = None, http=None, observe: bool = True) -> dict:
+    """One loop. ``observe=False`` when the stream has already stored this loop's observations."""
     gardener = gardener or make_gardener()
     with loop_lock(store):
         started = time.monotonic()
@@ -56,12 +57,13 @@ def run_once(store: Store, gardener=None, now: datetime | None = None, http=None
         loop = (last["loop"] if last else 0) + 1
         since = last["ts"] if last else ""
 
-        # 1–2. Observe. User logs are already stored (the UI appends them); Nimble's are new.
+        # 1–2. Observe. User logs and streamed readings are already stored; a one-off loop pulls Nimble itself.
         observations = store.read("observations")
-        user_logs = [o for o in observations if o["source"] == "user" and o["ts"] > since]
-        external = nimble_adapter.collect(now, loop, plan, observations, **({"http": http} if http else {}))
-        store.append("observations", *external)
-        fresh = user_logs + external
+        fresh = [o for o in observations if o["ts"] > since and o["source"] != "seed"]
+        if observe:
+            external = nimble_adapter.collect(now, loop, plan, observations, **({"http": http} if http else {}))
+            store.append("observations", *external)
+            fresh += external
 
         # 3–4. Rewrite, through the same gate whichever gardener spoke.
         proposed = gardener.propose(plan, fresh, today) if fresh else []
@@ -104,17 +106,99 @@ def report(result: dict) -> None:
         print(f"  rejected: {r}", file=sys.stderr)
 
 
+class Feed:
+    """One live source, polled on its own cadence. ``poll(now, loop, plan)`` returns only new observations."""
+
+    def __init__(self, name: str, every_s: int, poll):
+        self.name, self.every_s, self.poll, self.next_at = name, every_s, poll, 0.0
+
+
+def feeds(store: Store) -> list[Feed]:
+    """The live world around the garden. Dedupe state is rebuilt from the store, so a restart never re-posts."""
+    obs = store.read("observations")
+    last_cond = next((o["content"].get("obs_time") for o in reversed(obs) if o["kind"] == "conditions"), None)
+    alert_ids = {o["content"]["alert_id"] for o in obs if o["content"].get("alert_id")}
+    urls = {o["content"]["url"] for o in obs if o["content"].get("url")}
+    last_fc = next((o["content"]["text"] for o in reversed(obs) if o["kind"] == "forecast"), None)
+
+    def cond(now, loop, plan):
+        nonlocal last_cond
+        o = nimble_adapter.conditions(now, loop, last_cond)
+        if o:
+            last_cond = o["content"]["obs_time"]
+        return [o] if o else []
+
+    def forecast(now, loop, plan):
+        nonlocal last_fc
+        o = nimble_adapter.forecast(now, loop)
+        if not o or o["content"]["text"] == last_fc:
+            return []
+        last_fc = o["content"]["text"]
+        return [o]
+
+    env = lambda k, d: int(os.environ.get(k, d))  # noqa: E731
+    return [
+        Feed("conditions", env("PERENNIAL_CONDITIONS_EVERY_S", 120), cond),
+        Feed("alerts", env("PERENNIAL_ALERTS_EVERY_S", 60), lambda now, loop, plan: nimble_adapter.alerts(now, loop, alert_ids)),
+        Feed("forecast", env("PERENNIAL_FORECAST_EVERY_S", 1800), forecast),
+        Feed("news", env("NIMBLE_NEWS_EVERY_S", 1800), lambda now, loop, plan: nimble_adapter.news(now, loop, plan, urls)),
+    ]
+
+
+def stream(store: Store, gardener, think_every_s: int, tick_s: float = 3) -> None:
+    """Always on: poll each feed on its cadence, store what's new the moment it lands, and wake the gardener
+    at once for anything significant (a user log, an alert, a pest report, a changed forecast, a frosty
+    reading). Routine readings are batched into a think at most every ``think_every_s``."""
+    live = feeds(store)
+    last_think = time.monotonic()
+    alive = store.dir / ".stream.alive"  # the UI checks its mtime to know the stream is on
+    while True:
+        alive.touch()
+        now = nimble_adapter.utcnow()
+        last = store.last_loop()
+        loop = (last["loop"] if last else 0) + 1
+        plan = (store.latest_plan() or {}).get("plan", {})
+        for f in live:
+            if time.monotonic() < f.next_at:
+                continue
+            f.next_at = time.monotonic() + f.every_s
+            try:
+                new = f.poll(now, loop, plan)
+            except Exception as err:  # one source down never stops the stream
+                print(f"[stream] {f.name} failed: {err}", file=sys.stderr)
+                continue
+            store.append("observations", *new)
+            for o in new:
+                print(f"[stream] {o['kind']:<10} {o['content']['text'][:110]}", flush=True)
+
+        since = last["ts"] if last else ""
+        pending = [o for o in store.read("observations") if o["ts"] > since and o["source"] != "seed"]
+        waited = time.monotonic() - last_think
+        if pending and (any(nimble_adapter.significant(o) for o in pending) or waited >= think_every_s):
+            try:
+                report(run_once(store, gardener, observe=False))
+            except Exception as err:
+                print(f"[perennial] loop failed: {err!r}", file=sys.stderr)
+            last_think = time.monotonic()
+        sys.stdout.flush()
+        time.sleep(tick_s)
+
+
 def main() -> None:
     load_env()
     parser = argparse.ArgumentParser(description="Perennial's autonomous loop")
     parser.add_argument("--once", action="store_true", help="run one loop and exit")
     parser.add_argument("--every", type=int, default=int(os.environ.get("PERENNIAL_LOOP_EVERY_S", "300")),
-                        help="seconds between loops (default 300)")
+                        help="with --poll: seconds between loops; when streaming: max seconds routine readings wait")
+    parser.add_argument("--poll", action="store_true", help="old behaviour: a full loop every --every seconds")
     args = parser.parse_args()
 
     store = Store()
     gardener = make_gardener()
-    print(f"[perennial] data={store.dir} gardener={gardener.name} rawtree={'on' if store.rawtree else 'off'}")
+    print(f"[perennial] data={store.dir} gardener={gardener.name} rawtree={'on' if store.rawtree else 'off'}"
+          f" mode={'once' if args.once else 'poll' if args.poll else 'stream'}", flush=True)
+    if not (args.once or args.poll):
+        return stream(store, gardener, args.every)
     while True:
         try:
             report(run_once(store, gardener))

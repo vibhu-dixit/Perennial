@@ -64,6 +64,76 @@ def forecast(now: datetime, loop: int, http: HttpGet = _http) -> dict | None:
                 "open-meteo", low=round(low), date=day, rain_mm=rain)
 
 
+def conditions(now: datetime, loop: int, last_time: str | None, http: HttpGet = _http) -> dict | None:
+    """Current conditions (Open-Meteo refreshes every 15 min). None if unchanged since ``last_time``."""
+    lat, lon = os.environ.get("GARDEN_LAT"), os.environ.get("GARDEN_LON")
+    if not (lat and lon):
+        return None
+    qs = urllib.parse.urlencode({
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,soil_temperature_0cm,soil_moisture_0_to_1cm",
+        "timezone": "auto",
+    })
+    cur = http(f"https://api.open-meteo.com/v1/forecast?{qs}", {}, None)["current"]
+    if cur["time"] == last_time:
+        return None
+    air, soil, moist = cur["temperature_2m"], cur["soil_temperature_0cm"], cur["soil_moisture_0_to_1cm"]
+    text = (f"Now {air}°C air, {soil}°C soil, soil moisture {moist:.2f} m³/m³, humidity {cur['relative_humidity_2m']}%, "
+            f"wind {round(cur['wind_speed_10m'])} km/h, {cur['precipitation']} mm rain")
+    return _obs(now, "conditions", loop, text, "open-meteo", obs_time=cur["time"], air_c=air, soil_c=soil,
+                soil_moisture=moist, humidity=cur["relative_humidity_2m"], wind_kmh=cur["wind_speed_10m"],
+                rain_mm=cur["precipitation"])
+
+
+def alerts(now: datetime, loop: int, seen: set[str], http: HttpGet = _http) -> list[dict]:
+    """Active National Weather Service alerts for the garden's point (frost/freeze, storms). New ones only."""
+    lat, lon = os.environ.get("GARDEN_LAT"), os.environ.get("GARDEN_LON")
+    if not (lat and lon):
+        return []
+    data = http(f"https://api.weather.gov/alerts/active?point={lat},{lon}",
+                {"user-agent": "perennial-loop/0.1 (home garden agent)", "accept": "application/geo+json"}, None)
+    out = []
+    for f in data.get("features", []):
+        p = f.get("properties", {})
+        if p.get("id") in seen:
+            continue
+        seen.add(p["id"])
+        out.append(_obs(now, "alert", loop, f"{p.get('event')}: {p.get('headline')}", "nws", alert_id=p["id"],
+                        event=p.get("event"), severity=p.get("severity"), expires=p.get("expires")))
+    return out
+
+
+def news(now: datetime, loop: int, plan: dict, seen: set[str], http: HttpGet = _http) -> list[dict]:
+    """Nimble news search for pest/disease reports near the garden in the last day. New URLs only."""
+    key, url = os.environ.get("NIMBLE_API_KEY"), os.environ.get("NIMBLE_API_URL")
+    crops = sorted({b["crop"] for b in plan.get("beds", []) if b.get("crop")})
+    if not (key and url and crops):
+        return []
+    region = os.environ.get("GARDEN_REGION", "")
+    body = json.dumps({"query": f"{' OR '.join(crops[:4])} pest disease {region}", "max_results": 5,
+                       "search_depth": "lite", "focus": "news", "time_range": "day"}).encode()
+    data = http(url, {"authorization": f"Bearer {key}", "content-type": "application/json"}, body)
+    out = []
+    for r in data.get("results", []):
+        link = r.get("url")
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        out.append(_obs(now, "pest", loop, f"{r.get('title', '').strip()} — {(r.get('description') or '').strip()[:180]}",
+                        "nimble", url=link))
+    return out
+
+
+def significant(o: dict) -> bool:
+    """Should this observation wake the gardener right away? Routine conditions readings wait for the next think."""
+    c = o.get("content", {})
+    if o.get("kind") != "conditions":
+        return True
+    return (c.get("air_c", 99) <= 3 or c.get("soil_c", 99) <= 2 or c.get("rain_mm", 0) >= 5
+            or c.get("wind_kmh", 0) >= 50 or not 0.08 <= c.get("soil_moisture", 0.25) <= 0.45)
+
+
 def demo_forecast(now: datetime, loop: int) -> dict:
     thu = next_weekday(now.date(), 3)
     return _obs(now, "forecast", loop, f"7-day forecast: Thu {thu.isoformat()} low 2°C — cold snap", "demo", low=2, date=thu.isoformat())

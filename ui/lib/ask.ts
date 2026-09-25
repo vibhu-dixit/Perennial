@@ -36,37 +36,75 @@ function context(current: PlanVersion, edits: PlanEdit[], question: string) {
     .slice(0, 6);
 }
 
-async function askLiquid(question: string, current: PlanVersion, history: string[]): Promise<string | null> {
+/** Streams the answer from the local Liquid model, token by token. Yields nothing if the model is unreachable. */
+async function* streamLiquid(question: string, current: PlanVersion, history: string[], live: string[]): AsyncGenerator<string> {
   const { LIQUID_API_KEY: key, LIQUID_API_BASE: base, LIQUID_MODEL: model } = process.env;
-  if (!base) return null;
+  if (!base) return;
+  let res: Response;
   try {
-    const res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
+    res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
       body: JSON.stringify({
         model: model || "LFM2.5-VL-1.6B",
         temperature: 0.2,
+        stream: true,
         messages: [
-          { role: "system", content: `You are the garden's memory. Answer in 1-3 short sentences using ONLY the current plan and history below. If they don't say, say you don't know. End with "(plan v${current.version})".` },
-          { role: "user", content: `CURRENT PLAN v${current.version}:\n${JSON.stringify(current.plan)}\n\nRELEVANT HISTORY:\n${history.join("\n")}\n\nQUESTION: ${question}` },
+          { role: "system", content: `You are the garden's memory. Answer in 1-3 short sentences using ONLY the current plan, live readings and history below. If they don't say, say you don't know. End with "(plan v${current.version})".` },
+          { role: "user", content: `CURRENT PLAN v${current.version}:\n${JSON.stringify(current.plan)}\n\nLIVE NOW:\n${live.join("\n") || "(no live readings)"}\n\nRELEVANT HISTORY:\n${history.join("\n")}\n\nQUESTION: ${question}` },
         ],
       }),
       signal: AbortSignal.timeout(60_000),
     });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
   } catch {
-    return null;
+    return;
+  }
+  if (!res.ok || !res.body) return;
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      buf += decoder.decode(chunk, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") return;
+        try {
+          const tok = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (tok) yield tok;
+        } catch {
+          // keep-alive or partial frame
+        }
+      }
+    }
+  } catch {
+    // connection dropped mid-answer — keep what we have
   }
 }
 
-export async function askGarden(question: string): Promise<QA & { sources: string[]; engine: "liquid" | "memory" }> {
-  const [current, edits] = await Promise.all([latestPlan(), readTable("plan_edits")]);
+export type AskResult = QA & { sources: string[]; engine: "liquid" | "memory" };
+
+/** Answers a question, calling `onToken` as the answer streams in. The QA row is logged once complete. */
+export async function askGarden(question: string, onToken: (t: string) => void = () => {}): Promise<AskResult> {
+  const [current, edits, observations] = await Promise.all([latestPlan(), readTable("plan_edits"), readTable("observations")]);
   const facts = context(current, edits, question);
   const sources = facts.map((f) => f.t);
+  const streamed = observations.filter((o) => o.source === "nimble");
+  const live = [
+    streamed.findLast((o) => o.kind === "conditions"),
+    streamed.findLast((o) => o.kind === "forecast"),
+    ...streamed.filter((o) => o.kind === "alert").slice(-3),
+  ].flatMap((o) => (o ? [`${o.ts.slice(0, 16).replace("T", " ")} UTC — ${o.content.text}`] : []));
 
-  let answer = await askLiquid(question, current, sources);
+  let answer = "";
+  for await (const tok of streamLiquid(question, current, sources, live)) {
+    answer += tok;
+    onToken(tok);
+  }
+  answer = answer.trim();
   const engine = answer ? "liquid" : "memory";
   if (!answer) {
     answer = facts.length
@@ -77,6 +115,7 @@ export async function askGarden(question: string): Promise<QA & { sources: strin
           .map((f) => f.t)
           .join(" ")
       : "Nothing in the garden's memory about that yet — log it and I'll remember.";
+    onToken(answer);
   }
 
   const qa: QA = { ts: new Date().toISOString(), question, answer, plan_version: current.version };
