@@ -147,3 +147,5 @@ small model can only emit well-formed edits against real bed/task/threat ids. A 
 - Community blight network: anonymized regional pest pressure
 - Harvest predictions from your own historical yields
 - Perennial Premium: multi-garden, family sharing, print your season book
+
+### Demo Video: https://www.loom.com/share/12e0c5124c684f8cafeee6bd290788ca
