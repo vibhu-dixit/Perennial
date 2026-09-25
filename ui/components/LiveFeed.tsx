@@ -44,13 +44,13 @@ function describeObs(o: Observation): Line {
 function ObsRow({ o, clock }: { o: Observation; clock: number }) {
   const d = describeObs(o);
   return (
-    <li className="obs-row">
-      <span className={`src ${d.cls}`}>{d.label}</span>
-      <div className="obs-body">
-        <div className="obs-title">{d.href ? <a href={d.href} target="_blank" rel="noreferrer">{d.title}</a> : d.title}</div>
-        {d.detail && <div className="obs-detail">{d.detail}</div>}
+    <li className={`mini ${d.cls}`}>
+      <div className="mini-head">
+        <span className={`src ${d.cls}`}>{d.label}</span>
+        <time dateTime={o.ts} title={new Date(o.ts).toLocaleString()}>{ago(o.ts, clock)}</time>
       </div>
-      <time dateTime={o.ts} title={new Date(o.ts).toLocaleString()}>{ago(o.ts, clock)}</time>
+      <div className="obs-title">{d.href ? <a href={d.href} target="_blank" rel="noreferrer">{d.title}</a> : d.title}</div>
+      {d.detail && <div className="obs-detail">{d.detail}</div>}
     </li>
   );
 }
@@ -65,14 +65,14 @@ function editLabel(e: PlanEdit): string {
 }
 
 function Obs({ list, clock, limit = 4 }: { list: Observation[]; clock: number; limit?: number }) {
-  if (!list.length) return <p className="muted">Nothing new — a scheduled check-in.</p>;
+  if (!list.length) return <div className="mini none"><div className="obs-detail">Nothing new — a scheduled check-in.</div></div>;
   return (
     <>
-      <ul className="obs">{list.slice(0, limit).map((o, i) => <ObsRow key={`${o.ts}-${i}`} o={o} clock={clock} />)}</ul>
+      <ul className="cards">{list.slice(0, limit).map((o, i) => <ObsRow key={`${o.ts}-${i}`} o={o} clock={clock} />)}</ul>
       {list.length > limit && (
         <details className="more">
           <summary>{list.length - limit} more</summary>
-          <ul className="obs">{list.slice(limit).map((o, i) => <ObsRow key={`${o.ts}-m${i}`} o={o} clock={clock} />)}</ul>
+          <ul className="cards">{list.slice(limit).map((o, i) => <ObsRow key={`${o.ts}-m${i}`} o={o} clock={clock} />)}</ul>
         </details>
       )}
     </>
@@ -97,19 +97,22 @@ function Think({ l, read, edits, clock }: { l: LoopRun; read: Observation[]; edi
         <div>
           <div className="eyebrow">Decided</div>
           {edits.length ? (
-            <ul className="edits">
+            <ul className="cards one">
               {edits.map((e, i) => (
-                <li key={i}>
-                  <span className={`op ${e.op.toLowerCase()}`}>{e.op}</span>
-                  <div>
-                    <div className="obs-title">{editLabel(e)}</div>
-                    <div className="obs-detail">{e.reason}</div>
+                <li key={i} className={`mini edit ${e.op.toLowerCase()}`}>
+                  <div className="mini-head">
+                    <span className={`op ${e.op.toLowerCase()}`}>{e.op}</span>
                   </div>
+                  <div className="obs-title">{editLabel(e)}</div>
+                  <div className="obs-detail">Why: {e.reason}</div>
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="muted">The plan already covers it — nothing to change.</p>
+            <div className="mini none">
+              <div className="obs-title">No changes</div>
+              <div className="obs-detail">The plan already covers it.</div>
+            </div>
           )}
         </div>
       </div>
