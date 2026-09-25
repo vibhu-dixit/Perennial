@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { GardenState, LoopRun, Observation, PlanEdit } from "@/lib/types";
+import type { GardenState, LoopRun, PlanEdit } from "@/lib/types";
 import AskGarden from "./AskGarden";
 import BedMap from "./BedMap";
-import LiveFeed, { type FeedEvent } from "./LiveFeed";
+import LiveFeed from "./LiveFeed";
 import LogDialog from "./LogDialog";
 import ThisWeek from "./ThisWeek";
 import ThreatWatch from "./ThreatWatch";
@@ -13,16 +13,6 @@ import Vitals from "./Vitals";
 import { Logo, Plus } from "./icons";
 
 const POLL_MS = 30_000; // fallback only — rows are pushed over /api/stream
-
-const asEvent = (o: Observation, i = 0): FeedEvent => ({ ...o, key: `${o.ts}-${o.kind}-${i}` });
-const loopEvent = (l: LoopRun): FeedEvent => ({
-  ts: l.ts,
-  source: "gardener",
-  kind: "loop",
-  loop: l.loop,
-  key: `loop-${l.loop}`,
-  content: { text: `Loop ${l.loop}: read ${l.obs_count} observation${l.obs_count === 1 ? "" : "s"} → ${l.edits_count} plan edit${l.edits_count === 1 ? "" : "s"} in ${l.duration_s}s` },
-});
 
 function seasonChip(iso: string) {
   const d = new Date(iso);
@@ -43,7 +33,6 @@ export default function Garden({ initial }: { initial: GardenState }) {
   const [toast, setToast] = useState<Toast | null>(null);
   const [changed, setChanged] = useState<Set<string>>(new Set());
   const [clock, setClock] = useState(() => Date.now());
-  const [events, setEvents] = useState<FeedEvent[]>(() => initial.live.events.map(asEvent));
   const prev = useRef(initial);
   const pendingLog = useRef<string | null>(null);
   const manual = useRef(false); // a button-run loop toasts for itself
@@ -73,16 +62,8 @@ export default function Garden({ initial }: { initial: GardenState }) {
     es.addEventListener("row", (msg) => {
       const { table, row } = JSON.parse((msg as MessageEvent).data) as { table: string; row: unknown };
       setClock(Date.now());
-      if (table === "observations") {
-        const o = row as Observation;
-        setEvents((ev) => [asEvent(o, ev.length), ...ev].slice(0, 40));
-        if (o.kind === "conditions") setState((st) => ({ ...st, live: { ...st.live, conditions: o, streaming: true } }));
-      } else if (table === "loops") {
-        const l = row as LoopRun;
-        setEvents((ev) => [loopEvent(l), ...ev].slice(0, 40));
-        void announce(l);
-      }
-      soon();
+      if (table === "loops") void announce(row as LoopRun);
+      else soon(); // a new reading, log, edit or answer — re-render from the server's view
     });
     return () => { es.close(); if (timer) clearTimeout(timer); };
   }, []);
@@ -167,6 +148,16 @@ export default function Garden({ initial }: { initial: GardenState }) {
           </div>
         </div>
         <span className="chip">{seasonChip(state.now)}</span>
+        {state.location && (
+          <span className="chip" title={`Forecast, alerts and news are for ${state.location.name}`}>
+            <span aria-hidden>📍</span>
+            {state.location.name.replace(/, Pennsylvania$/, ", PA")} ·{" "}
+            <span className="mono">
+              {Math.abs(state.location.lat).toFixed(4)}°{state.location.lat >= 0 ? "N" : "S"},{" "}
+              {Math.abs(state.location.lon).toFixed(4)}°{state.location.lon >= 0 ? "E" : "W"}
+            </span>
+          </span>
+        )}
         <span className={`chip live${isLive ? "" : " past"}`}>
           <span className="dot" />
           {isLive ? (state.live.streaming ? "STREAMING" : "LIVE") : `PAST · v${viewing.version}`}
@@ -208,7 +199,7 @@ export default function Garden({ initial }: { initial: GardenState }) {
         </div>
 
         <div className="full">
-          <LiveFeed live={state.live} events={events} clock={clock} />
+          <LiveFeed live={state.live} clock={clock} />
         </div>
 
         <div className="full">

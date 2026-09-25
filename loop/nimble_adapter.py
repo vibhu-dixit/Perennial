@@ -61,7 +61,7 @@ def forecast(now: datetime, loop: int, http: HttpGet = _http) -> dict | None:
     rain = round(sum(d[3] or 0 for d in days))
     wd = WEEKDAY[date.fromisoformat(day).weekday()]
     return _obs(now, "forecast", loop, f"7-day forecast: coldest {wd} {day} low {round(low)}°C, high {round(high)}°C; {rain} mm rain this week",
-                "open-meteo", low=round(low), date=day, rain_mm=rain)
+                "open-meteo", low=round(low), high=round(high), date=day, rain_mm=rain)
 
 
 def conditions(now: datetime, loop: int, last_time: str | None, http: HttpGet = _http) -> dict | None:
@@ -186,7 +186,8 @@ def collect(now: datetime, loop: int, plan: dict, recent: list[dict], http: Http
         out.append(demo_forecast(now, loop))
     else:
         fc = attempt("forecast", lambda: forecast(now, loop, http))
-        if fc:
+        last_fc = next((o["content"]["text"] for o in reversed(recent) if o.get("kind") == "forecast"), None)
+        if fc and fc["content"]["text"] != last_fc:  # an unchanged forecast is not news
             out.append(fc)
 
     every = timedelta(seconds=int(os.environ.get("NIMBLE_SEARCH_EVERY_S", "3600")))

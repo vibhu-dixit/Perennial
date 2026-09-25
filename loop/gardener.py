@@ -153,6 +153,9 @@ def _validate_one(plan: dict, e: Any) -> str | None:
             return f"a {coll[:-1]} with that title already exists"
         if op == "RETIRE":
             return None
+        if op == "UPDATE" and isinstance(after, dict) and after.get("title") and any(
+                x.get("id") != ident and x.get("title", "").lower() == str(after["title"]).lower() for x in plan.get(coll, [])):
+            return f"another {coll[:-1]} already has that title"
         err = _check_fields(after, fields, required if op == "ADD" else frozenset())
         if err:
             return err
@@ -196,9 +199,13 @@ def hygiene(plan: dict, today: date) -> list[dict]:
     """The discard boundary, enforced every loop whatever the gardener said."""
     edits = []
     stale = (today - timedelta(days=2)).isoformat()
+    titles: set[str] = set()
     for t in plan.get("tasks", []):
         if t.get("due", "9999") < stale:
             edits.append({"op": "RETIRE", "target": f"tasks/{t['id']}", "reason": "Stale — past due"})
+        elif t.get("title", "").lower() in titles:
+            edits.append({"op": "RETIRE", "target": f"tasks/{t['id']}", "reason": "Duplicate of another task"})
+        titles.add(t.get("title", "").lower())
     for t in plan.get("threats", []):
         if t.get("status") == "resolved":
             edits.append({"op": "RETIRE", "target": f"threats/{t['id']}", "reason": "Resolved — archived"})

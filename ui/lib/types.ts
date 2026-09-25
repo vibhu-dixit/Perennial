@@ -121,12 +121,18 @@ export interface GardenState {
   };
   gardener: "python" | "demo";
   live: LiveState;
+  /** Where the forecast, alerts and news searches point (GARDEN_* env). */
+  location: { name: string; lat: number; lon: number } | null;
 }
 
 /** The streamed side of the garden: the latest conditions reading and the newest events. */
 export interface LiveState {
   conditions: Observation | null;
+  /** Non-seed observations since just before the oldest loop in `loops`, newest first. */
   events: Observation[];
+  /** The gardener's most recent loops, newest first, with the plan edits each one made. */
+  loops: LoopRun[];
+  edits: PlanEdit[];
   /** True while `python loop/main.py` (stream mode) is running. */
   streaming: boolean;
 }

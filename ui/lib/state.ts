@@ -18,6 +18,9 @@ export async function gardenState(version?: number): Promise<GardenState> {
   const viewing = (version && sorted.find((v) => v.version === version)) || current;
   const lastNimble = observations.findLast((o) => o.source === "nimble");
   const liveObs = observations.filter((o) => o.source !== "seed");
+  const recentLoops = loops.slice(-6).reverse();
+  const since = loops.at(-7)?.ts ?? "";
+  const [lat, lon] = [Number(process.env.GARDEN_LAT), Number(process.env.GARDEN_LON)];
 
   return {
     now: new Date().toISOString(),
@@ -40,8 +43,13 @@ export async function gardenState(version?: number): Promise<GardenState> {
     gardener: gardenerKind(),
     live: {
       conditions: liveObs.findLast((o) => o.kind === "conditions") ?? null,
-      events: liveObs.slice(-25).reverse(),
+      events: liveObs.filter((o) => o.ts > since).slice(-80).reverse(),
+      loops: recentLoops,
+      edits: edits.filter((e) => recentLoops.some((l) => l.loop === e.loop) && e.op !== "KEEP"),
       streaming: await streamAlive(),
     },
+    location: process.env.GARDEN_LAT && process.env.GARDEN_LON && !Number.isNaN(lat) && !Number.isNaN(lon)
+      ? { name: process.env.GARDEN_REGION || "Garden", lat, lon }
+      : null,
   };
 }
