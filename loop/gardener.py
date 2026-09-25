@@ -331,8 +331,41 @@ class LiquidGardener:
         return edits
 
 
+def log_edits(plan: dict, observations: list[dict], today: date) -> list[dict]:
+    """Your logs are facts, not suggestions: applied every loop, whichever gardener is thinking.
+    A planting fills the bed and closes the matching sow/transplant task; a harvest marks the bed harvesting."""
+    edits: list[dict] = []
+    work = plan
+
+    def add(e: dict) -> None:
+        nonlocal work
+        edits.append(e)
+        work = apply_edit(work, e)
+
+    for o in observations:
+        if o["source"] != "user":
+            continue
+        c = o["content"]
+        bed, crop, action = c.get("bed"), c.get("crop"), c.get("action")
+        if not bed or find(work, f"beds/{bed}") is None:
+            continue
+        if action == "plant" and crop:
+            add({"op": "UPDATE", "target": f"beds/{bed}", "after": {"crop": crop, "stage": "seedling", "planted": today.isoformat()},
+                 "reason": "Logged planting", "evidence": c["text"]})
+            stem = crop.lower().rstrip("s")
+            done = next((t for t in work["tasks"] if stem in t["title"].lower()
+                         and re.search(r"transplant|sow|plant", t["title"], re.I)), None)
+            if done:
+                add({"op": "RETIRE", "target": f"tasks/{done['id']}", "reason": "Done — logged by you", "evidence": c["text"]})
+        elif action == "harvest" and find(work, f"beds/{bed}").get("crop"):
+            add({"op": "UPDATE", "target": f"beds/{bed}", "after": {"stage": "harvest"},
+                 "reason": "Logged harvest", "evidence": c["text"]})
+    return edits
+
+
 class RuleGardener:
-    """Deterministic stand-in for offline runs (mirrors the UI's demo gardener)."""
+    """Deterministic stand-in for offline runs (mirrors the UI's demo gardener). Your logs are applied
+    by ``log_edits`` before any gardener runs; this covers the rest — frost threats and cover tasks."""
 
     name = "rules"
 
@@ -344,25 +377,6 @@ class RuleGardener:
             nonlocal work
             edits.append(e)
             work = apply_edit(work, e)
-
-        for o in observations:
-            if o["source"] != "user":
-                continue
-            c = o["content"]
-            bed, crop, action = c.get("bed"), c.get("crop"), c.get("action")
-            if not bed or find(work, f"beds/{bed}") is None:
-                continue
-            if action == "plant" and crop:
-                add({"op": "UPDATE", "target": f"beds/{bed}", "after": {"crop": crop, "stage": "seedling", "planted": today.isoformat()},
-                     "reason": "Logged planting", "evidence": c["text"]})
-                stem = crop.lower().rstrip("s")
-                done = next((t for t in work["tasks"] if stem in t["title"].lower()
-                             and re.search(r"transplant|sow|plant", t["title"], re.I)), None)
-                if done:
-                    add({"op": "RETIRE", "target": f"tasks/{done['id']}", "reason": "Done — logged by you", "evidence": c["text"]})
-            elif action == "harvest":
-                add({"op": "UPDATE", "target": f"beds/{bed}", "after": {"crop": "", "stage": "empty"},
-                     "reason": "Logged harvest", "evidence": c["text"]})
 
         for o in observations:
             c = o["content"]

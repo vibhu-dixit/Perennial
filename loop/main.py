@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import nimble_adapter
-from gardener import apply_within_budget, hygiene, make_gardener, validate
+from gardener import apply_within_budget, hygiene, log_edits, make_gardener, validate
 from plan import empty_plan, iso, plan_words
 from rawtree_store import Store, load_env
 
@@ -65,10 +65,16 @@ def run_once(store: Store, gardener=None, now: datetime | None = None, http=None
             store.append("observations", *external)
             fresh += external
 
-        # 3–4. Rewrite, through the same gate whichever gardener spoke.
-        proposed = gardener.propose(plan, fresh, today) if fresh else []
-        proposed, errors = validate(plan, {"edits": proposed})
-        new_plan, applied, refused = apply_within_budget(plan, proposed)
+        # 3. Your logs are facts — applied first, so the gardener thinks about the garden as it now is.
+        facts, _ = validate(plan, {"edits": log_edits(plan, fresh, today)})
+        new_plan, applied, refused = apply_within_budget(plan, facts)
+
+        # 4. Rewrite, through the same gate whichever gardener spoke.
+        proposed = gardener.propose(new_plan, fresh, today) if fresh else []
+        proposed, errors = validate(new_plan, {"edits": proposed})
+        new_plan, suggested, refused_more = apply_within_budget(new_plan, proposed)
+        applied += suggested
+        refused += refused_more
         new_plan, cleanup, _ = apply_within_budget(new_plan, hygiene(new_plan, today))
         applied += cleanup
 

@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402
 import nimble_adapter  # noqa: E402
-from gardener import LiquidGardener, RuleGardener, apply_within_budget, edit_schema, hygiene, parse_json, validate  # noqa: E402
+from gardener import LiquidGardener, RuleGardener, apply_within_budget, edit_schema, hygiene, log_edits, parse_json, validate  # noqa: E402
 from plan import WORD_BUDGET, apply_edit, empty_plan, plan_words  # noqa: E402
 from rawtree_store import Store  # noqa: E402
 
@@ -174,8 +174,12 @@ class Liquid(unittest.TestCase):
 class Rules(unittest.TestCase):
     def test_planting_peppers_before_a_cold_snap(self):
         log = user_log("Transplanted peppers, bed 5", action="plant", bed="bed_5", crop="peppers")
-        edits = RuleGardener().propose(garden(), [log, cold_forecast()], TODAY)
+        facts = log_edits(garden(), [log], TODAY)
         plan = garden()
+        for e in facts:
+            plan = apply_edit(plan, e)
+        after_facts = plan
+        edits = RuleGardener().propose(after_facts, [log, cold_forecast()], TODAY)
         for e in edits:
             plan = apply_edit(plan, e)
         titles = [t["title"] for t in plan["tasks"]]
@@ -183,7 +187,8 @@ class Rules(unittest.TestCase):
         self.assertIn("Cover tomatoes Thu night", titles)
         self.assertNotIn("Transplant pepper starts into bed 5", titles)  # done — retired
         self.assertEqual(plan["threats"][0]["status"], "active")
-        self.assertEqual(validate(garden(), {"edits": edits})[1], [])
+        self.assertEqual(validate(garden(), {"edits": facts})[1], [])
+        self.assertEqual(validate(after_facts, {"edits": edits})[1], [])
 
 
     def test_same_crop_in_two_beds_gets_distinct_titles(self):
@@ -234,6 +239,14 @@ class Loop(unittest.TestCase):
             result = main.run_once(self.store, RuleGardener(), NOW, http=broken)
         self.assertEqual(result["obs_count"], 1)
         self.assertEqual(self.store.latest_plan()["plan"]["beds"][0]["crop"], "kale")
+
+    def test_logged_planting_lands_even_when_the_model_says_no_changes(self):
+        self.store.append("plan_versions", {"version": 1, "ts": "2026-09-01T00:00:00.000Z", "loop": 0, "plan": garden()})
+        self.store.append("observations", user_log("Transplanted peppers, bed 5", action="plant", bed="bed_5", crop="peppers"))
+        result = main.run_once(self.store, LiquidGardener(lambda _: '{"edits": []}'), NOW, observe=False)
+        bed5 = self.store.latest_plan()["plan"]["beds"][4]
+        self.assertEqual((result["version"], bed5["crop"], bed5["stage"]), (2, "peppers", "seedling"))
+        self.assertNotIn("Transplant pepper starts into bed 5", [t["title"] for t in self.store.latest_plan()["plan"]["tasks"]])
 
     def test_bad_liquid_output_never_corrupts_the_plan(self):
         self.store.append("plan_versions", {"version": 1, "ts": "2026-09-01T00:00:00.000Z", "loop": 0, "plan": garden()})
