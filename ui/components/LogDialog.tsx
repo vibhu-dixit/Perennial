@@ -16,12 +16,16 @@ export default function LogDialog({ beds, onClose, onLogged }: { beds: Bed[]; on
   const [busy, setBusy] = useState(false);
   const first = useRef<HTMLButtonElement>(null);
 
+  // The page re-renders every few seconds while streaming, handing us a new onClose each time.
+  // Focus only once on open — re-focusing on every render yanked the cursor out of the note field.
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     first.current?.focus();
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && close.current();
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
-  }, [onClose]);
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
