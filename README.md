@@ -61,9 +61,12 @@ perennial/
 │   └── rawtree_store.py      # append/query helpers (rtree CLI)
 ├── seed/
 │   └── demo_garden.py        # seeds 2 seasons of history for the demo
-├── ui/
-│   └── index.html            # the garden: bed map, this week, threat watch,
-│                             # ask-the-garden, season timeline
+├── ui/                       # Next.js (App Router) frontend
+│   ├── app/                  # page + API routes: /api/state, /api/log, /api/loop, /api/ask
+│   ├── components/           # bed map, this week, threat watch, ask-the-garden,
+│   │                         # season timeline, vitals strip, log dialog
+│   └── lib/                  # JSONL store (RawTree fallback), plan edits, demo gardener
+├── data/                     # local JSONL store shared by loop + UI (gitignored)
 └── mockups/
     └── plot-plan-ui.webp     # design reference
 ```
@@ -75,8 +78,19 @@ cp .env.example .env        # fill in LIQUID_API_KEY, NIMBLE_API_KEY, rtree logi
 rtree login
 python seed/demo_garden.py  # 2 seasons of history in ~60 seconds
 python loop/main.py         # start the autonomous loop
-open ui/index.html          # watch the garden think
+cd ui && npm install && npm run dev   # open http://localhost:3000 and watch the garden think
 ```
+
+### Frontend only (no keys needed)
+
+```bash
+cd ui
+npm install
+npm run dev      # http://localhost:3000
+npm run seed     # optional: reset ../data to fresh demo history
+```
+
+The UI reads and appends the RawTree tables (`observations`, `plan_versions`, `plan_edits`, `qa_log`, `loops`) as JSONL files in `data/` — the local fallback from the PDD — and seeds two seasons of history on first run. "+ Log planting" appends a user observation and runs one loop on demand: `python loop/main.py --once` if it exists, otherwise a rule-based demo gardener (with the scripted "cold snap Thursday" Nimble injection; set `PERENNIAL_DEMO=0` to turn it off). "Ask the garden" uses Liquid AI when `LIQUID_API_KEY` + `LIQUID_API_BASE` are set, and otherwise answers from the plan's own memory.
 
 ## Why it wins
 
