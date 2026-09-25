@@ -1,4 +1,5 @@
 import "server-only";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { buildSeed } from "./seed";
@@ -64,6 +65,19 @@ export async function append<T extends TableName>(table: T, ...rows: Tables[T][]
   if (!rows.length) return;
   await ensureSeeded();
   await fs.appendFile(file(table), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  if (process.env.PERENNIAL_STORE?.toLowerCase() === "rawtree") {
+    for (const row of rows) await rtreeInsert(table, row);
+  }
+}
+
+/** Mirrors a row into RawTree via the `rtree` CLI, like loop/rawtree_store.py. JSONL stays the source of truth. */
+function rtreeInsert(table: TableName, row: unknown): Promise<void> {
+  return new Promise((resolve) => {
+    execFile("rtree", ["insert", "--table", table, "--data", JSON.stringify(row)], { timeout: 30_000 }, (err, _out, stderr) => {
+      if (err) console.error(`[store] rtree insert failed: ${String(stderr || err).trim().slice(0, 200)}`);
+      resolve();
+    });
+  });
 }
 
 export async function latestPlan(): Promise<PlanVersion> {
