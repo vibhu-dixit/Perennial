@@ -55,10 +55,12 @@ perennial/
 ├── PDD.md                    # product design document
 ├── .env.example              # LIQUID_API_KEY, NIMBLE_API_KEY, RAWTREE_*
 ├── loop/
-│   ├── main.py               # the autonomous loop
-│   ├── nimble_adapter.py     # weather / pest / variety observations
+│   ├── main.py               # the autonomous loop (--once for one run)
+│   ├── nimble_adapter.py     # forecast / pest / variety observations
 │   ├── gardener.py           # Liquid AI plan-rewrite calls + JSON validation
-│   └── rawtree_store.py      # append/query helpers (rtree CLI)
+│   ├── plan.py               # plan edits + word count (mirrors ui/lib/plan.ts)
+│   ├── rawtree_store.py      # append/query helpers (JSONL + rtree CLI)
+│   └── tests/                # failure paths: bad JSON, Nimble down, word budget
 ├── seed/
 │   └── demo_garden.py        # seeds 2 seasons of history for the demo
 ├── ui/                       # Next.js (App Router) frontend
@@ -73,24 +75,34 @@ perennial/
 
 ## Quickstart
 
-```bash
-cp .env.example .env        # fill in LIQUID_API_KEY, NIMBLE_API_KEY, rtree login
-rtree login
-python seed/demo_garden.py  # 2 seasons of history in ~60 seconds
-python loop/main.py         # start the autonomous loop
-cd ui && npm install && npm run dev   # open http://localhost:3000 and watch the garden think
-```
-
-### Frontend only (no keys needed)
+No keys needed to try it — the loop falls back to a rule gardener and the demo forecast.
 
 ```bash
-cd ui
-npm install
-npm run dev      # http://localhost:3000
-npm run seed     # optional: reset ../data to fresh demo history
+cp .env.example .env              # add keys when you have them (see below)
+python seed/demo_garden.py        # 2 seasons of history (needs node)
+python loop/main.py               # the autonomous loop, every 5 min (or --once)
+cd ui && npm install && npm run dev   # http://localhost:3000 — watch the garden think
 ```
 
-The UI reads and appends the RawTree tables (`observations`, `plan_versions`, `plan_edits`, `qa_log`, `loops`) as JSONL files in `data/` — the local fallback from the PDD — and seeds two seasons of history on first run. "+ Log planting" appends a user observation and runs one loop on demand: `python loop/main.py --once` if it exists, otherwise a rule-based demo gardener (with the scripted "cold snap Thursday" Nimble injection; set `PERENNIAL_DEMO=0` to turn it off). "Ask the garden" uses Liquid AI when `LIQUID_API_KEY` + `LIQUID_API_BASE` are set, and otherwise answers from the plan's own memory.
+"+ Log planting" in the UI appends a user observation and runs `loop/main.py --once` on demand. Run the tests with `python -m unittest discover -s loop/tests`.
+
+### Keys
+
+| Setting | Used for | Without it |
+|---|---|---|
+| `LIQUID_API_KEY` + `LIQUID_API_BASE` (+ `LIQUID_MODEL`) | Plan edits and "Ask the garden" (OpenAI-compatible chat API) | Rule gardener; Ask answers from the plan's memory |
+| `NIMBLE_API_KEY` + `NIMBLE_API_URL` | Pest alerts and variety notes via web search | No search observations |
+| `GARDEN_LAT` + `GARDEN_LON` | Real 7-day forecast and frost risk (Open-Meteo, no key) | Demo forecast only |
+| `PERENNIAL_STORE=rawtree` + `rtree login` | Every row also written to RawTree | Local JSONL in `data/` only |
+
+`PERENNIAL_DEMO=1` (the default) injects the scripted "cold snap Thursday" forecast for the live demo; set it to `0` to use the real forecast.
+
+### How the loop stays safe
+
+- Liquid AI's reply is checked against a strict schema. A bad reply gets one repair retry; after that the loop makes no changes. The plan is never corrupted.
+- Any edit that would push the plan over 600 words is refused. Each loop also retires stale tasks, resolved threats and, if needed, the oldest season notes.
+- If Nimble or the forecast is down, the loop keeps going on user logs alone.
+- Storage is append-only, so a bad loop never destroys history. A file lock stops two loops from running at once.
 
 ## Why it wins
 

@@ -16,10 +16,9 @@ export interface Tables {
 }
 export type TableName = keyof Tables;
 
-export const DATA_DIR = path.resolve(
-  /*turbopackIgnore: true*/
-  process.env.PERENNIAL_DATA_DIR ?? path.join(/*turbopackIgnore: true*/ process.cwd(), "..", "data"),
-);
+// Relative paths resolve against the repo root, exactly like loop/rawtree_store.py.
+const ROOT = path.resolve(/*turbopackIgnore: true*/ process.cwd(), "..");
+export const DATA_DIR = path.resolve(ROOT, process.env.PERENNIAL_DATA_DIR || "data");
 
 const file = (table: TableName) => path.join(DATA_DIR, `${table}.jsonl`);
 

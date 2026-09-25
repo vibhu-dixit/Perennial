@@ -7,9 +7,10 @@ import { WEEKDAY, addDays, applyEdit, isFrostTender, isoDay, nextWeekday, planWo
 import { append, latestPlan, readTable } from "./store";
 import type { Observation, Plan, PlanEdit } from "./types";
 
-// One on-demand loop (PDD §5). If the Python loop exists it does the real work
-// (Nimble → Liquid AI → RawTree); until then a rule-based demo gardener stands in
-// with the same inputs and outputs, so the UI can be built and demoed against it.
+// One on-demand loop (PDD §5). The Python loop does the real work (Nimble →
+// Liquid AI → RawTree). If it's missing or fails (no python3, a crash), a
+// rule-based demo gardener stands in with the same inputs and outputs so the
+// demo never stalls.
 
 const LOOP_PY = path.resolve(/*turbopackIgnore: true*/ process.cwd(), "..", "loop", "main.py");
 
@@ -17,10 +18,19 @@ export function gardenerKind(): "python" | "demo" {
   return existsSync(LOOP_PY) ? "python" : "demo";
 }
 
-export async function runLoop(): Promise<{ edits: number; kind: "python" | "demo" }> {
+export async function runLoop(): Promise<{ edits: number; kind: "python" | "demo"; error?: string }> {
   if (gardenerKind() === "python") {
-    await promisify(execFile)("python3", [LOOP_PY, "--once"], { cwd: path.dirname(LOOP_PY), timeout: 60_000 });
-    return { edits: -1, kind: "python" };
+    try {
+      const { stdout } = await promisify(execFile)(process.env.PERENNIAL_PYTHON || "python3", [LOOP_PY, "--once"], {
+        cwd: path.dirname(LOOP_PY),
+        timeout: 90_000,
+      });
+      const edits = Number(stdout.match(/→ (\d+) edits/)?.[1] ?? -1);
+      return { edits, kind: "python" };
+    } catch (err) {
+      console.error("[loop] python loop failed, using demo gardener:", err);
+      return { edits: await demoLoop(), kind: "demo", error: String(err) };
+    }
   }
   return { edits: await demoLoop(), kind: "demo" };
 }
@@ -86,10 +96,11 @@ async function demoLoop(): Promise<number> {
       if (!bed.crop || !isFrostTender(bed.crop)) continue;
       const id = `t_cover_${bed.id}_${forecast.content.date}`;
       if (plan.tasks.some((t) => t.id === id)) continue;
+      const where = plan.beds.filter((b) => b.crop === bed.crop).length > 1 ? ` in bed ${bed.id.slice(4)}` : "";
       edit({
         op: "ADD",
         target: `tasks/${id}`,
-        after: { title: `Cover ${bed.crop} ${WEEKDAY[day.getUTCDay()]} night`, due: isoDay(day), priority: "high", reason: `frost risk ${low}°C ${WEEKDAY[day.getUTCDay()]}` },
+        after: { title: `Cover ${bed.crop}${where} ${WEEKDAY[day.getUTCDay()]} night`, due: isoDay(day), priority: "high", reason: `frost risk ${low}°C ${WEEKDAY[day.getUTCDay()]}` },
         reason: `${bed.crop} in bed ${bed.id.slice(4)} are frost-tender`,
         evidence: forecast.content.text,
       });
