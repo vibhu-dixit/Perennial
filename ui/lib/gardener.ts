@@ -23,7 +23,7 @@ export async function runLoop(): Promise<{ edits: number; kind: "python" | "demo
     try {
       const { stdout } = await promisify(execFile)(process.env.PERENNIAL_PYTHON || "python3", [LOOP_PY, "--once"], {
         cwd: path.dirname(LOOP_PY),
-        timeout: 90_000,
+        timeout: 240_000, // local Liquid model + one repair retry
       });
       const edits = Number(stdout.match(/→ (\d+) edits/)?.[1] ?? -1);
       return { edits, kind: "python" };

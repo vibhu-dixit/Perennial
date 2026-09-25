@@ -93,11 +93,11 @@ def _snippets(payload: Any, limit: int = 3) -> list[str]:
 
 
 def nimble_search(query: str, http: HttpGet = _http) -> list[str]:
-    """One Nimble web search. Adjust the request body here to match your Nimble plan's API."""
+    """One Nimble web search (POST https://sdk.nimbleway.com/v2/search → {results: [{title, description, url}]})."""
     key, url = os.environ.get("NIMBLE_API_KEY"), os.environ.get("NIMBLE_API_URL")
     if not (key and url):
         return []
-    body = json.dumps({"query": query, "num_results": 3}).encode()
+    body = json.dumps({"query": query, "max_results": 3, "search_depth": "lite", "time_range": "month"}).encode()
     return _snippets(http(url, {"authorization": f"Bearer {key}", "content-type": "application/json"}, body))
 
 

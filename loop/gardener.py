@@ -3,7 +3,7 @@
 * LiquidGardener — the real thing (PDD §7): Liquid AI returns ONLY JSON edits,
   validated against a strict schema; malformed output gets one repair retry,
   then falls back to "no changes this loop". The plan is never corrupted.
-* RuleGardener — deterministic stand-in used when no Liquid AI key is set, so
+* RuleGardener — deterministic stand-in used when no Liquid AI endpoint is set, so
   the loop and the demo still work offline. Same inputs, same outputs.
 
 Both run through the same validator and word-budget gate before anything is applied.
@@ -84,8 +84,14 @@ def validate(plan: dict, payload: Any) -> tuple[list[dict], list[str]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("edits"), list):
         return [], ['top level must be {"edits": [...]}']
     edits, errors = [], []
+    seen: set[str] = set()
     for n, e in enumerate(payload["edits"][:MAX_EDITS]):
         err = _validate_one(plan, e)
+        if not err and _is_noop(plan, e):
+            continue  # an UPDATE that changes nothing — small models echo the plan back
+        if not err and e["op"] != "KEEP" and e["target"] not in ("season_notes", "learnings"):
+            err = f"duplicate edit to {e['target']}" if e["target"] in seen else None
+            seen.add(e["target"])
         if err:
             errors.append(f"edit {n}: {err}")
         else:
@@ -93,6 +99,12 @@ def validate(plan: dict, payload: Any) -> tuple[list[dict], list[str]]:
     if len(payload["edits"]) > MAX_EDITS:
         errors.append(f"too many edits (max {MAX_EDITS})")
     return edits, errors
+
+
+def _is_noop(plan: dict, e: dict) -> bool:
+    current = find(plan, e["target"]) if e["op"] == "UPDATE" else None
+    return isinstance(current, dict) and isinstance(e.get("after"), dict) and all(
+        current.get(k) == v for k, v in e["after"].items())
 
 
 def _validate_one(plan: dict, e: Any) -> str | None:
@@ -134,6 +146,11 @@ def _validate_one(plan: dict, e: Any) -> str | None:
         fields, required = (TASK_FIELDS, TASK_FIELDS) if coll == "tasks" else (THREAT_FIELDS, {"kind", "title", "status"})
         if op in ("UPDATE", "RETIRE") and not exists:
             return f"no {coll[:-1]} {ident}"
+        if op == "ADD" and exists:
+            return f"{coll[:-1]} {ident} already exists — UPDATE it instead"
+        if op == "ADD" and any(x.get("title", "").lower() == str(after.get("title", "") if isinstance(after, dict) else "").lower()
+                               for x in plan.get(coll, [])):
+            return f"a {coll[:-1]} with that title already exists"
         if op == "RETIRE":
             return None
         err = _check_fields(after, fields, required if op == "ADD" else frozenset())
@@ -197,18 +214,60 @@ def hygiene(plan: dict, today: date) -> list[dict]:
 Chat = Callable[[list[dict]], str]
 
 
-def liquid_chat(messages: list[dict]) -> str:
-    """One OpenAI-compatible chat completion against Liquid AI."""
-    base, key = os.environ["LIQUID_API_BASE"].rstrip("/"), os.environ["LIQUID_API_KEY"]
+def edit_schema(plan: dict) -> dict:
+    """JSON schema for the edits, tight enough for a small local model: llama.cpp turns it into a grammar,
+    so the model can only emit targets and fields the validator accepts (ids of existing items are enums)."""
+    text = {"type": "string", "minLength": 1, "maxLength": 200}
+    new_id = "^[a-z][a-z0-9_]{2,40}$"
+    date_ = {"type": "string", "pattern": r"^20[0-9]{2}-[01][0-9]-[0-3][0-9]$"}
+
+    def obj(props: dict, required: list[str]) -> dict:
+        return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+
+    def edit(op: str, target: dict, **extra: dict) -> dict:
+        props = {"op": {"const": op}, "target": target, **extra, "reason": text, "evidence": text}
+        return obj(props, ["op", "target", *extra, "reason"])
+
+    def existing(coll: str) -> dict:
+        ids = [f"{coll}/{x['id']}" for x in plan.get(coll, [])]
+        return {"enum": ids} if ids else {"const": f"{coll}/none"}
+
+    task = {"title": text, "due": date_, "priority": {"enum": list(PRIORITIES)}, "reason": text}
+    threat = {"kind": {"enum": list(THREAT_KINDS)}, "title": text, "status": {"enum": list(THREAT_STATUS)}, "reason": text}
+    bed = {"crop": text, "stage": {"enum": list(STAGES)}, "planted": date_, "sun": {"enum": list(LEVELS)},
+           "water": {"enum": list(LEVELS)}, "note": text}
+    lines = {"enum": list(plan.get("season_notes", [])) + list(plan.get("learnings", []))} if (
+        plan.get("season_notes") or plan.get("learnings")) else text
+    options = [
+        edit("ADD", {"type": "string", "pattern": new_id.replace("^", "^tasks/t_")}, after=obj(task, list(task))),
+        edit("ADD", {"type": "string", "pattern": new_id.replace("^", "^threats/")}, after=obj(threat, ["kind", "title", "status"])),
+        edit("ADD", {"enum": ["season_notes", "learnings"]}, after=text),
+        edit("UPDATE", existing("beds"), after=obj(bed, [])),
+        edit("UPDATE", existing("tasks"), after=obj(task, [])),
+        edit("UPDATE", existing("threats"), after=obj(threat, [])),
+        edit("UPDATE", {"enum": ["season_notes", "learnings"]}, before=lines, after=text),
+        edit("RETIRE", {"anyOf": [existing("tasks"), existing("threats")]}),
+        edit("RETIRE", {"enum": ["season_notes", "learnings"]}, before=lines),
+    ]
+    return obj({"edits": {"type": "array", "maxItems": 8, "items": {"anyOf": options}}}, ["edits"])
+
+
+def liquid_chat(messages: list[dict], schema: dict | None = None) -> str:
+    """One OpenAI-compatible chat completion against Liquid AI (a local llama-server by default; key optional)."""
+    base, key = os.environ["LIQUID_API_BASE"].rstrip("/"), os.environ.get("LIQUID_API_KEY")
     body = json.dumps({
-        "model": os.environ.get("LIQUID_MODEL") or "lfm-40b",
+        "model": os.environ.get("LIQUID_MODEL") or "LFM2.5-VL-1.6B",
         "temperature": 0.1,
+        "max_tokens": 1500,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "edits", "schema": schema}} if schema
+        else {"type": "json_object"},
         "messages": messages,
     }).encode()
-    req = urllib.request.Request(f"{base}/chat/completions", data=body, headers={
-        "authorization": f"Bearer {key}", "content-type": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=60) as res:
+    headers = {"content-type": "application/json"}
+    if key:
+        headers["authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(f"{base}/chat/completions", data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=120) as res:
         return json.loads(res.read())["choices"][0]["message"]["content"]
 
 
@@ -230,7 +289,7 @@ def parse_json(text: str) -> Any:
 class LiquidGardener:
     name = "liquid"
 
-    def __init__(self, chat: Chat = liquid_chat):
+    def __init__(self, chat: Chat | None = None):
         self.chat = chat
 
     def propose(self, plan: dict, observations: list[dict], today: date) -> list[dict]:
@@ -241,9 +300,10 @@ class LiquidGardener:
                                         f"CURRENT PLAN ({plan_words(plan)} words):\n{json.dumps(plan, ensure_ascii=False)}\n\n"
                                         f"NEW OBSERVATIONS:\n{obs}\n\n{SCHEMA}"},
         ]
+        chat = self.chat or (lambda m: liquid_chat(m, edit_schema(plan)))
         for attempt in (1, 2):  # one repair retry, then no-op
             try:
-                reply = self.chat(messages)
+                reply = chat(messages)
             except Exception as err:
                 print(f"[gardener] Liquid AI call failed: {err}", file=sys.stderr)
                 return []
@@ -323,6 +383,6 @@ class RuleGardener:
 
 
 def make_gardener() -> LiquidGardener | RuleGardener:
-    if os.environ.get("LIQUID_API_KEY") and os.environ.get("LIQUID_API_BASE"):
+    if os.environ.get("LIQUID_API_BASE"):
         return LiquidGardener()
     return RuleGardener()

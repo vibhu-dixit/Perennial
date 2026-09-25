@@ -38,20 +38,20 @@ function context(current: PlanVersion, edits: PlanEdit[], question: string) {
 
 async function askLiquid(question: string, current: PlanVersion, history: string[]): Promise<string | null> {
   const { LIQUID_API_KEY: key, LIQUID_API_BASE: base, LIQUID_MODEL: model } = process.env;
-  if (!key || !base) return null;
+  if (!base) return null;
   try {
     const res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
       body: JSON.stringify({
-        model: model || "lfm-40b",
+        model: model || "LFM2.5-VL-1.6B",
         temperature: 0.2,
         messages: [
           { role: "system", content: `You are the garden's memory. Answer in 1-3 short sentences using ONLY the current plan and history below. If they don't say, say you don't know. End with "(plan v${current.version})".` },
           { role: "user", content: `CURRENT PLAN v${current.version}:\n${JSON.stringify(current.plan)}\n\nRELEVANT HISTORY:\n${history.join("\n")}\n\nQUESTION: ${question}` },
         ],
       }),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(60_000),
     });
     if (!res.ok) return null;
     const data = await res.json();

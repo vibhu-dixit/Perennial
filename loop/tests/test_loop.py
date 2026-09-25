@@ -17,7 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402
-from gardener import LiquidGardener, RuleGardener, apply_within_budget, hygiene, parse_json, validate  # noqa: E402
+from gardener import LiquidGardener, RuleGardener, apply_within_budget, edit_schema, hygiene, parse_json, validate  # noqa: E402
 from plan import WORD_BUDGET, apply_edit, empty_plan, plan_words  # noqa: E402
 from rawtree_store import Store  # noqa: E402
 
@@ -83,6 +83,23 @@ class Validate(unittest.TestCase):
         ]})
         self.assertEqual(len(errors), 8)
         self.assertEqual([e["target"] for e in edits], ["tasks/t_peppers"])
+
+    def test_rejects_echoed_plan_items(self):
+        pep = {"title": "Transplant pepper starts into bed 5", "due": "2026-09-25", "priority": "high", "reason": "starts ready"}
+        edits, errors = validate(garden(), {"edits": [
+            {"op": "ADD", "target": "tasks/t_peppers", "after": pep, "reason": "copy"},
+            {"op": "ADD", "target": "tasks/t_peppers_2", "after": pep, "reason": "same title"},
+            {"op": "UPDATE", "target": "tasks/t_peppers", "after": {"priority": "high"}, "reason": "no change"},
+            {"op": "UPDATE", "target": "tasks/t_peppers", "after": {"priority": "med"}, "reason": "real change"},
+            {"op": "RETIRE", "target": "tasks/t_peppers", "reason": "second edit to the same task"},
+        ]})
+        self.assertEqual([e["reason"] for e in edits], ["real change"])
+        self.assertEqual(len(errors), 3)
+
+    def test_edit_schema_is_json_and_names_existing_ids(self):
+        schema = json.dumps(edit_schema(garden()))
+        self.assertIn('"tasks/t_peppers"', schema)
+        self.assertIn('"beds/bed_6"', schema)
 
     def test_rejects_wrong_top_level(self):
         self.assertEqual(validate(garden(), [])[0], [])

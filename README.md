@@ -84,18 +84,28 @@ python loop/main.py               # the autonomous loop, every 5 min (or --once)
 cd ui && npm install && npm run dev   # http://localhost:3000 — watch the garden think
 ```
 
+**Liquid AI runs locally** — LFM2.5-VL-1.6B through llama.cpp, no API key (~1.7 GB download on first run):
+
+```bash
+brew install llama.cpp
+llama-server -hf LiquidAI/LFM2.5-VL-1.6B-GGUF:Q8_0 --jinja --port 8089 --alias LFM2.5-VL-1.6B -c 8192 -ngl 99 -np 1
+```
+
+The loop sends llama.cpp a JSON schema built from the current plan (`edit_schema` in `loop/gardener.py`), so the
+small model can only emit well-formed edits against real bed/task/threat ids. A loop takes ~10–40 s on an M-series Mac.
+
 "+ Log planting" in the UI appends a user observation and runs `loop/main.py --once` on demand. Run the tests with `python -m unittest discover -s loop/tests`.
 
 ### Keys
 
 | Setting | Used for | Without it |
 |---|---|---|
-| `LIQUID_API_KEY` + `LIQUID_API_BASE` (+ `LIQUID_MODEL`) | Plan edits and "Ask the garden" (OpenAI-compatible chat API) | Rule gardener; Ask answers from the plan's memory |
-| `NIMBLE_API_KEY` + `NIMBLE_API_URL` | Pest alerts and variety notes via web search | No search observations |
-| `GARDEN_LAT` + `GARDEN_LON` | Real 7-day forecast and frost risk (Open-Meteo, no key) | Demo forecast only |
-| `PERENNIAL_STORE=rawtree` + `rtree login` | Every row also written to RawTree | Local JSONL in `data/` only |
+| `LIQUID_API_BASE` (+ `LIQUID_MODEL`, optional `LIQUID_API_KEY`) | Plan edits and "Ask the garden" (OpenAI-compatible chat API — the local llama-server above) | Rule gardener; Ask answers from the plan's memory |
+| `NIMBLE_API_KEY` + `NIMBLE_API_URL` (`https://sdk.nimbleway.com/v2/search`) | Pest alerts and variety notes via web search | No search observations |
+| `GARDEN_LAT` + `GARDEN_LON` (+ `GARDEN_REGION`) | Real 7-day forecast and frost risk (Open-Meteo, no key). Defaults to Lancaster County, PA — prime farmland with a real frost season | Demo forecast only |
+| `PERENNIAL_STORE=rawtree` + `RAWTREE_DATABASE` + `rtree login --api-key …` | Every row also written to RawTree | Local JSONL in `data/` only |
 
-`PERENNIAL_DEMO=1` (the default) injects the scripted "cold snap Thursday" forecast for the live demo; set it to `0` to use the real forecast.
+`PERENNIAL_DEMO=1` injects the scripted "cold snap Thursday" forecast for the live demo; `.env.example` ships with `0`, the real forecast.
 
 ### How the loop stays safe
 
